@@ -4,7 +4,8 @@ import sys
 from pymongo import MongoClient, ASCENDING, DESCENDING
 
 balance_depth = 1000
-reward_coef = 0.85
+reward_coef = 0.9
+
 
 class LeaseTx:
     def __init__(self, sender, amount, lease_id, height):
@@ -21,6 +22,7 @@ class LeaseTx:
         return "LeaseTx leaseId: '{}', sender: '{}', amount: '{}', height: '{}'"\
             .format(self.lease_id, self.sender, self.amount, self.height)
 
+
 class CanceledLease:
     def __init__(self, lease_id, height):
         self.lease_id = lease_id
@@ -33,6 +35,7 @@ class CanceledLease:
     def __str__(self):
         return "CancelLeaseTx leaseId: '{}', height: '{}'"\
             .format(self.lease_id, self.height)
+
 
 class MinedBlock:
     def __init__(self, calculated_fees, height):
@@ -83,7 +86,7 @@ class LeaserProfile:
         * 
 """
 
-actual_start_height = 715315
+
 step = 100
 
 
@@ -110,12 +113,16 @@ if __name__ == '__main__':
     miner = sys.argv[2]
     db_client = MongoClient(port=27017)
     db = db_client.payout_calculator
-    print('What do you want to do?', 'Type one of the following commands:', 'crawl', 'calculate', sep='\n')
+    print('What do you want to do?', 'Type one of the following commands:', 'crawl', 'check', 'calculate', sep='\n')
     command = input("On your command: ")
     if command == 'crawl':
         print('Starting the crawler')
+        crawl_start_height = 1
+        if db.blocks.count_documents({}) != 0:
+            crawl_start_height = db.blocks.find().sort([('height', DESCENDING)]).next()['height'] + 1
+
         blockchain_height = requests.get('{}/blocks/height'.format(node_api)).json()['height']
-        for seq_start in range(actual_start_height, blockchain_height, step):
+        for seq_start in range(crawl_start_height, blockchain_height, step):
             seq_end = seq_start + step - 1
             print('Crawling blocks from {} to {}'.format(seq_start, seq_end))
             blocks = get_blocks(node_api, seq_start, seq_end)
@@ -123,33 +130,63 @@ if __name__ == '__main__':
         print('Crawling done')
         sys.exit()
 
+    elif command == 'check':
+        crawled_blocks_count = db.blocks.count_documents({})
+        print('There are {} blocks in Mongo DB'.format(crawled_blocks_count))
+        last_block = db.blocks.find().sort([('height', DESCENDING)]).next()
+        print("Last block's height is {}".format(last_block['height']))
+        print('Establishing backwards chain check starting from {}'.format(last_block['signature']))
+        while last_block['height'] > 1:
+            parent_block_id = last_block['reference']
+            maybe_parent_block = db.blocks.find_one({'signature': parent_block_id})
+            if maybe_parent_block is None:
+                raise Exception("Couldn't find block '{}' for height {}".format(parent_block_id, last_block['height']))
+            last_block = maybe_parent_block
+        print('Block storage check success: reached genesis block')
+
     elif command == 'calculate':
         print('Launching calculation')
         known_leases = []
         known_lease_ids = []
         cancelled_leases = []
         mined_blocks = []
-        for block in db.blocks.find().sort([('height', ASCENDING)]):
-            txs = block['transactions']
-            block_height = block['height']
-            leases = find_leases(txs, block_height, miner)
-            if len(leases) > 0:
-                known_leases.extend(leases)
-                known_lease_ids.extend(list(map(lambda l: l.lease_id, leases)))
-                print('Found leases:', *leases, sep='\n')
+        with db_client.start_session() as db_session:
+            found_blocks_cursor = db.blocks.find(
+                {'$or': [{'transactionCount': {'$gt': 0}}, {'generator': miner}]},
+                no_cursor_timeout=True, session=db_session).sort([('height', ASCENDING)])
+            blocks_to_process = found_blocks_cursor.count()
+            iteration_count = 1
+            for block in found_blocks_cursor:
+                txs = block['transactions']
+                block_height = block['height']
 
-            cancelled = find_canceled_leases(txs, known_lease_ids, block_height)
-            if len(cancelled) > 0:
-                cancelled_leases.extend(cancelled)
-                print('Found cancelled leases:', *cancelled, sep='\n')
+                # Update mongo session every 100th block processed
+                if iteration_count % 100 == 0:
+                    print('Iteration {}/{}, processing block at height {}'
+                          .format(iteration_count, blocks_to_process, block_height))
+                    session_update_result = db_client.admin\
+                        .command('refreshSessions', [db_session.session_id], session=db_session)
 
-            if block['generator'] == miner:
-                block_fee = block['fee']
-                parent_block_id = block['reference']
-                previous_block_fee = db.blocks.find_one({'signature': parent_block_id})['fee']
-                earned_fee = int(0.4 * block_fee + 0.6 * previous_block_fee)
-                if earned_fee > 0:
-                    mined_blocks.append(MinedBlock(earned_fee, block_height))
+                leases = find_leases(txs, block_height, miner)
+                if len(leases) > 0:
+                    known_leases.extend(leases)
+                    known_lease_ids.extend(list(map(lambda l: l.lease_id, leases)))
+                    print('Found leases:', *leases, sep='\n')
+
+                cancelled = find_canceled_leases(txs, known_lease_ids, block_height)
+                if len(cancelled) > 0:
+                    cancelled_leases.extend(cancelled)
+                    print('Found cancelled leases:', *cancelled, sep='\n')
+
+                if block['generator'] == miner:
+                    block_fee = block['fee']
+                    parent_block_id = block['reference']
+                    previous_block_fee = db.blocks.find_one({'signature': parent_block_id})['fee']
+                    earned_fee = int(0.4 * block_fee + 0.6 * previous_block_fee)
+                    if earned_fee > 0:
+                        mined_blocks.append(MinedBlock(earned_fee, block_height))
+
+                iteration_count += 1
 
         print('Found leases:', *known_leases, sep='\n')
         print('Cancelled leases:', *cancelled_leases, sep='\n')
