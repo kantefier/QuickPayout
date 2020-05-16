@@ -4,7 +4,6 @@ import sys
 from pymongo import MongoClient, ASCENDING, DESCENDING
 
 balance_depth = 1000
-reward_coef = 0.9
 
 
 class LeaseTx:
@@ -133,7 +132,7 @@ if __name__ == '__main__':
     elif command == 'check':
         crawled_blocks_count = db.blocks.count_documents({})
         print('There are {} blocks in Mongo DB'.format(crawled_blocks_count))
-        last_block = db.blocks.find().sort([('height', DESCENDING)]).next()
+        last_block = db.blocks.find().sort([('height', DESCENDING)]).limit(1).next()
         print("Last block's height is {}".format(last_block['height']))
         print('Establishing backwards chain check starting from {}'.format(last_block['signature']))
         while last_block['height'] > 1:
@@ -141,20 +140,64 @@ if __name__ == '__main__':
             maybe_parent_block = db.blocks.find_one({'signature': parent_block_id})
             if maybe_parent_block is None:
                 raise Exception("Couldn't find block '{}' for height {}".format(parent_block_id, last_block['height']))
-            last_block = maybe_parent_block
+            else:
+                print('Found previous block {} at height {}'.format(maybe_parent_block['signature'], maybe_parent_block['height']))
+                last_block = maybe_parent_block
         print('Block storage check success: reached genesis block')
 
     elif command == 'calculate':
-        print('Launching calculation')
+        since_height = 1
+        since_height_input = input("Calculate since (height, default is 1): ")
+        if len(since_height_input) == 0:
+            print('Going to calculate since genesis')
+        elif not since_height_input.isdigit():
+            print('Expected height as a number, aborting')
+            sys.exit(2)
+        else:
+            since_height = int(since_height_input)
+
+        period_start_height = since_height
+        period_start_height_input = input("Enter start period height: ")
+        if len(period_start_height_input) == 0:
+            print('Going to calculate payouts since {} height'.format(since_height))
+        elif not period_start_height_input.isdigit():
+            print('Expected height as a number, aborting')
+            sys.exit(2)
+        else:
+            period_start_height = int(period_start_height_input)
+
+        reward_coef_input = input("Enter reward coefficient (default is 0.9): ")
+        reward_coef = 0.9
+        if len(reward_coef_input) == 0:
+            print('Going to calculate using reward coefficient of 0.9 (90% earnings for leasers)')
+        else:
+            try:
+                reward_coef = float(reward_coef_input)
+            except ValueError:
+                print('ERROR: expected reward_coef as a float number')
+                sys.exit(2)
+
+        print('Launching calculation since height {}'.format(since_height))
         known_leases = []
         known_lease_ids = []
         cancelled_leases = []
         mined_blocks = []
         with db_client.start_session() as db_session:
             found_blocks_cursor = db.blocks.find(
-                {'$or': [{'transactionCount': {'$gt': 0}}, {'generator': miner}]},
-                no_cursor_timeout=True, session=db_session).sort([('height', ASCENDING)])
+                {'$and': [
+                    {'height': {'$gte': since_height}},
+                    {'$or': [
+                        {'transactionCount': {'$gt': 0}},
+                        {'$and': [
+                            {'height': {'$gte': period_start_height}},
+                            {'generator': miner}
+                        ]}
+                    ]}
+                ]},
+                no_cursor_timeout=True,
+                session=db_session).sort([('height', ASCENDING)])
             blocks_to_process = found_blocks_cursor.count()
+            print('Got {} blocks to process'.format(blocks_to_process))
             iteration_count = 1
             for block in found_blocks_cursor:
                 txs = block['transactions']
@@ -178,7 +221,7 @@ if __name__ == '__main__':
                     cancelled_leases.extend(cancelled)
                     print('Found cancelled leases:', *cancelled, sep='\n')
 
-                if block['generator'] == miner:
+                if block['generator'] == miner and block['height'] >= period_start_height:
                     block_fee = block['fee']
                     parent_block_id = block['reference']
                     previous_block_fee = db.blocks.find_one({'signature': parent_block_id})['fee']
@@ -203,7 +246,6 @@ if __name__ == '__main__':
             all_canceled = [cancelled for cancelled in cancelled_leases if cancelled.lease_id in all_leases_ids]
             profile = LeaserProfile(sender, all_leases, all_canceled)
             leaser_profiles.append(profile)
-            print('Constructed a profile: {}'.format(profile))
 
         print('Constructed leaser profiles:', *leaser_profiles, sep='\n')
         max_height_in_db = db.blocks.find().sort([('height', DESCENDING)]).limit(1).next()['height']
