@@ -4,3 +4,5 @@ FROM python:slim
 RUN python -m pip install \
         requests \
         pymongo
+
+ADD PayoutCalculator.py /script/PayoutCalculator.py
