@@ -224,7 +224,12 @@ if __name__ == '__main__':
                 if block['generator'] == miner and block['height'] >= period_start_height:
                     block_fee = block['fee']
                     parent_block_id = block['reference']
-                    previous_block_fee = db.blocks.find_one({'signature': parent_block_id})['fee']
+                    previous_block = db.blocks.find_one({'signature': parent_block_id})
+                    if previous_block is None:
+                        raise Exception("Could not find parent block '{}' for block '{}'".\
+                                        format(parent_block_id, block['signature']))
+
+                    previous_block_fee = previous_block['fee']
                     earned_fee = int(0.4 * block_fee + 0.6 * previous_block_fee)
                     if earned_fee > 0:
                         mined_blocks.append(MinedBlock(earned_fee, block_height))
