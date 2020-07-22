@@ -119,6 +119,9 @@ if __name__ == '__main__':
         crawl_start_height = 1
         if db.blocks.count_documents({}) != 0:
             crawl_start_height = db.blocks.find().sort([('height', DESCENDING)]).next()['height'] + 1
+        else:
+            print('Going to crawl the blockchain from the beginning')
+            db.blocks.create_index([('height', ASCENDING)])
 
         blockchain_height = requests.get('{}/blocks/height'.format(node_api)).json()['height']
         for seq_start in range(crawl_start_height, blockchain_height, step):
