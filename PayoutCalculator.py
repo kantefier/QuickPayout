@@ -117,13 +117,19 @@ if __name__ == '__main__':
     if command == 'crawl':
         print('Starting the crawler')
         crawl_start_height = 1
+
+        if any(index_key for index_key in db.blocks.index_information().keys() if index_key.startswith("height")):
+            print("Checked an index for 'block.height'")
+        else:
+            db.blocks.create_index([('height', ASCENDING)])
+            print("Created an index for 'block.height'")
+
         if db.blocks.count_documents({}) != 0:
             crawl_start_height = db.blocks.find().sort([('height', DESCENDING)]).next()['height'] + 1
-        else:
-            print('Going to crawl the blockchain from the beginning')
-            db.blocks.create_index([('height', ASCENDING)])
 
         blockchain_height = requests.get('{}/blocks/height'.format(node_api)).json()['height']
+        print("Initiating crawling process from '{}' to '{}'", crawl_start_height, blockchain_height)
+
         for seq_start in range(crawl_start_height, blockchain_height, step):
             seq_end = seq_start + step - 1
             print('Crawling blocks from {} to {}'.format(seq_start, seq_end))
