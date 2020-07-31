@@ -128,7 +128,7 @@ if __name__ == '__main__':
             crawl_start_height = db.blocks.find().sort([('height', DESCENDING)]).next()['height'] + 1
 
         blockchain_height = requests.get('{}/blocks/height'.format(node_api)).json()['height']
-        print("Initiating crawling process from '{}' to '{}'", crawl_start_height, blockchain_height)
+        print("Initiating crawling process from '{}' to '{}'".format(crawl_start_height, blockchain_height))
 
         for seq_start in range(crawl_start_height, blockchain_height, step):
             seq_end = seq_start + step - 1
