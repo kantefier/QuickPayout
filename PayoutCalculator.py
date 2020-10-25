@@ -1,7 +1,8 @@
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 import requests
 import sys
 from pymongo import MongoClient, ASCENDING, DESCENDING
+import copy
 
 balance_depth = 1000
 
@@ -88,18 +89,56 @@ class LeaserProfile:
 
 step = 100
 
+LEASE_TX_TYPE = 8
+LEASE_CANCEL_TX_TYPE = 9
+
+PreparedDataToPersist = namedtuple('PreparedDataToPersist', 'block_headers, lease_txs, lease_cancel_txs')
+
 
 def get_blocks(node_api, from_block, to_block):
     return requests.get(node_api + '/blocks/seq/{}/{}'.format(from_block, to_block)).json()
 
 
+def add_height_to_txs(txs, height):
+    for tx in txs:
+        tx.update({'height': height})
+        yield tx
+
+
+def prepare_data_to_persist(blocks):
+    block_headers = []
+    lease_txs_accumulator = []
+    lease_cancel_txs_accumulator = []
+    for block in blocks:
+        # block_header = block.pop('transactions', None)
+        height = block['height']
+        block_txs = copy.deepcopy(block['transactions'])
+        filtered_lease_txs = filter(lambda tx: tx['type'] == LEASE_TX_TYPE, block_txs)
+        lease_txs = add_height_to_txs(filtered_lease_txs, height)
+        filtered_lease_cancel_txs = filter(lambda tx: tx['type'] == LEASE_CANCEL_TX_TYPE, block_txs)
+        lease_cancel_txs = add_height_to_txs(filtered_lease_cancel_txs, height)
+        lease_txs_accumulator.extend([x for x in lease_txs])
+        lease_cancel_txs_accumulator.extend([x for x in lease_cancel_txs])
+        block.pop('transactions', None)
+        block_headers.append(block)
+    return PreparedDataToPersist(block_headers, lease_txs_accumulator, lease_cancel_txs_accumulator)
+
+
+def check_index(db_collection, index_name, direction):
+    if any(index_key for index_key in db_collection.index_information().keys() if index_key.startswith(index_name)):
+        print("Index '{}' is present for collection '{}'".format(index_name, db_collection.name))
+    else:
+        db_collection.create_index([(index_name, direction)])
+        print("Created index '{}' for collection '{}'".format(index_name, db_collection.name))
+
+
 def find_leases(txs, height, miner):
     # for lease in ():
-    return [LeaseTx(tx['sender'], tx['amount'], tx['id'], height) for tx in txs if(tx['type'] == 8 and tx['recipient'] == miner)]
+    return [LeaseTx(tx['sender'], tx['amount'], tx['id'], height) for tx in txs if(tx['type'] == LEASE_TX_TYPE and tx['recipient'] == miner)]
 
 
 def find_canceled_leases(txs, known_leases, height):
-    return [CanceledLease(tx['leaseId'], height) for tx in txs if(tx['type'] == 9 and tx['leaseId'] in known_leases)]
+    return [CanceledLease(tx['leaseId'], height) for tx in txs if(tx['type'] == LEASE_CANCEL_TX_TYPE and tx['leaseId'] in known_leases)]
 
 
 def total_stake_at_height(profiles, height):
@@ -134,23 +173,25 @@ if __name__ == '__main__':
         print('Starting the crawler')
         crawl_start_height = 1
 
-        if any(index_key for index_key in db.blocks.index_information().keys() if index_key.startswith("height")):
-            print("Checked an index for 'block.height'")
-        else:
-            db.blocks.create_index([('height', ASCENDING)])
-            print("Created an index for 'block.height'")
+        check_index(db.block_headers, 'height', ASCENDING)
+        check_index(db.lease_txs, 'height', ASCENDING)
+        check_index(db.lease_cancel_txs, 'height', ASCENDING)
 
-        if db.blocks.count_documents({}) != 0:
-            crawl_start_height = db.blocks.find().sort([('height', DESCENDING)]).next()['height'] + 1
+        if db.block_headers.count_documents({}) != 0:
+            crawl_start_height = db.block_headers.find().sort([('height', DESCENDING)]).next()['height'] + 1
 
         blockchain_height = requests.get('{}/blocks/height'.format(node_api)).json()['height']
         print("Initiating crawling process from '{}' to '{}'".format(crawl_start_height, blockchain_height))
 
         for seq_start in range(crawl_start_height, blockchain_height, step):
             seq_end = seq_start + step - 1
-            print('Crawling blocks from {} to {}'.format(seq_start, seq_end))
+            print('Crawling blocks from {} to {} ({} left)'.format(seq_start, seq_end, blockchain_height - seq_start))
             blocks = get_blocks(node_api, seq_start, seq_end)
-            db.blocks.insert_many(blocks)
+            prepared_data = prepare_data_to_persist(blocks)
+
+            db.block_headers.insert_many(prepared_data.block_headers)
+            db.lease_txs.insert_many(prepared_data.lease_txs)
+            db.lease_cancel_txs.insert_many(prepared_data.lease_cancel_txs)
         print('Crawling done')
         sys.exit()
 
