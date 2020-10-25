@@ -108,12 +108,28 @@ def total_stake_at_height(profiles, height):
 
 if __name__ == '__main__':
     print('Payout calculator launched')
-    node_api = sys.argv[1]
-    miner = sys.argv[2]
+    arg_names = ['cmd', 'node_api', 'miner', 'maybe_command']
+    named_args = dict(zip(arg_names, sys.argv))
+    if named_args.get('node_api') is None:
+        print('Node api not specified')
+        sys.exit(2)
+    node_api = named_args.get('node_api')
+
+    if named_args.get('miner') is None:
+        print('Miner is not defined')
+        sys.exit(2)
+    miner = named_args.get('miner')
+
+    if named_args.get('maybe_command') is None:
+        print('What do you want to do?', 'Type one of the following commands:', 'crawl', 'check', 'calculate', sep='\n')
+        command = input("On your command: ")
+    else:
+        command = named_args.get('maybe_command')
+
+    # That's insecure, should use username & password from some file or whatever
     db_client = MongoClient(port=27017)
     db = db_client.payout_calculator
-    print('What do you want to do?', 'Type one of the following commands:', 'crawl', 'check', 'calculate', sep='\n')
-    command = input("On your command: ")
+
     if command == 'crawl':
         print('Starting the crawler')
         crawl_start_height = 1
