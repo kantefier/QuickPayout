@@ -4,73 +4,50 @@ import sys
 from pymongo import MongoClient, ASCENDING, DESCENDING
 import copy
 import logging
+from itertools import groupby
 
 balance_depth = 1000
 
 
-class LeaseTx:
-    def __init__(self, sender, amount, lease_id, height):
-        self.sender = sender
+MinedBlock = namedtuple('MinedBlock', 'calculated_fees, height')
+
+
+class Lease:
+    def __init__(self, lease_id, amount, activation_height, cancel_height):
+        self.lease_id = lease_id
         self.amount = amount
-        self.lease_id = lease_id
-        self.height = height
+        self.activation_height = activation_height
+        self.cancel_height = cancel_height
 
     def __repr__(self):
-        return "<LeaseTx leaseId:{}, sender:{}, amount:{}, height:{}>"\
-            .format(self.lease_id, self.sender, self.amount, self.height)
+        return "<LeaseTx leaseId:{}, amount:{}, activation_height:{}, cancel_height:{}>"\
+            .format(self.lease_id, self.amount, self.activation_height, self.cancel_height)
 
     def __str__(self):
-        return "LeaseTx leaseId: '{}', sender: '{}', amount: '{}', height: '{}'"\
-            .format(self.lease_id, self.sender, self.amount, self.height)
+        return "LeaseTx leaseId: '{}', amount: '{}', activationHeight: '{}', cancelHeight: '{}'"\
+            .format(self.lease_id, self.amount, self.activation_height, self.cancel_height)
 
-
-class CanceledLease:
-    def __init__(self, lease_id, height):
-        self.lease_id = lease_id
-        self.height = height
-
-    def __repr__(self):
-        return "<CancelLeaseTx leaseId:{}, height:{}>"\
-            .format(self.lease_id, self.height)
-
-    def __str__(self):
-        return "CancelLeaseTx leaseId: '{}', height: '{}'"\
-            .format(self.lease_id, self.height)
-
-
-class MinedBlock:
-    def __init__(self, calculated_fees, height):
-        self.calculated_fees = calculated_fees
-        self.height = height
-
-    def __repr__(self):
-        return "<MinedBlock at height:{}".format(self.height)
-
-    def __str__(self):
-        return "MinedBlock at height: {} with total acquired fees: {}".format(self.height, self.calculated_fees)
+    def is_active(self, at_height):
+        if self.cancel_height is None:
+            return self.activation_height <= at_height
+        else:
+            return self.activation_height <= at_height < self.cancel_height
 
 
 class LeaserProfile:
-    def __init__(self, sender, leases, cancelled):
+    def __init__(self, sender, leases):
         self.sender = sender
         self.leases = leases
-        self.cancelled = cancelled
 
     def __repr__(self):
-        return "<LeaserProfile {}, leases:{}, cancelled:{}>".format(self.sender, len(self.leases), len(self.cancelled))
+        return "<LeaserProfile {}, leases:{}>".format(self.sender, len(self.leases))
 
     def __str__(self):
-        return "LeaserProfile '{}' with {} active leases".format(self.sender, len(self.leases) - len(self.cancelled))
-
-    def is_lease_cancelled(self, lease_id, height):
-        return len([x for x in self.cancelled if x.lease_id == lease_id and height >= x.height]) > 0
+        return "LeaserProfile '{}' with {} leases".format(self.sender, len(self.leases))
 
     def stake_for_height(self, check_height):
-        stake_sum = 0
-        for lease in self.leases:
-            if not self.is_lease_cancelled(lease.lease_id, check_height)\
-                    and lease.height + balance_depth < check_height:
-                stake_sum += lease.amount
+        active_leases_for_height = filter(lambda l: l.is_active(check_height), self.leases)
+        stake_sum = sum(map(lambda l: l.amount, active_leases_for_height))
         return stake_sum
 
 
@@ -135,18 +112,6 @@ def check_index(db_collection, index_name, direction):
         logger.info("Created index '{}' for collection '{}'".format(index_name, db_collection.name))
 
 
-def find_leases(txs, height, miner):
-    return [LeaseTx(tx['sender'], tx['amount'], tx['id'], height) for tx in txs if(tx['type'] == LEASE_TX_TYPE and tx['recipient'] == miner)]
-
-
-def find_canceled_leases(txs, known_leases, height):
-    return [CanceledLease(tx['leaseId'], height) for tx in txs if(tx['type'] == LEASE_CANCEL_TX_TYPE and tx['leaseId'] in known_leases)]
-
-
-def total_stake_at_height(profiles, height):
-    return sum(map(lambda p: p.stake_for_height(height), profiles))
-
-
 if __name__ == '__main__':
     logging.basicConfig(
         level=logging.INFO, format='%(asctime)s %(levelname)s [%(module)s] %(message)s')
@@ -180,8 +145,9 @@ if __name__ == '__main__':
         crawl_start_height = 1
 
         check_index(db.block_headers, 'height', ASCENDING)
-        check_index(db.lease_txs, 'height', ASCENDING)
-        check_index(db.lease_cancel_txs, 'height', ASCENDING)
+        check_index(db.block_headers, 'signature', ASCENDING)
+        check_index(db.leases, 'activation_height', ASCENDING)
+        check_index(db.leases, 'id', ASCENDING)
 
         if db.block_headers.count_documents({}) != 0:
             crawl_start_height = db.block_headers.find().sort([('height', DESCENDING)]).next()['height'] + 1
@@ -213,41 +179,22 @@ if __name__ == '__main__':
         sys.exit()
 
     elif command == 'check':
-        crawled_blocks_count = db.blocks.count_documents({})
-        logger.info('There are {} blocks in Mongo DB'.format(crawled_blocks_count))
-        last_block = db.blocks.find().sort([('height', DESCENDING)]).limit(1).next()
-        logger.info("Last block's height is {}".format(last_block['height']))
-        logger.info('Establishing backwards chain check starting from {}'.format(last_block['signature']))
-        while last_block['height'] > 1:
-            parent_block_id = last_block['reference']
-            maybe_parent_block = db.blocks.find_one({'signature': parent_block_id})
-            if maybe_parent_block is None:
-                raise Exception("Couldn't find block '{}' for height {}".format(parent_block_id, last_block['height']))
-            else:
-                logger.debug('Found previous block {} at height {}'.format(maybe_parent_block['signature'], maybe_parent_block['height']))
-                last_block = maybe_parent_block
-        logger.info('Block storage check success: reached genesis block')
+        logger.error("Checking isn't implemented for newer DB structure")
+        sys.exit(2)
 
     elif command == 'calculate':
-        since_height = 1
-        since_height_input = input("Calculate since (height, default is 1): ")
-        if len(since_height_input) == 0:
-            logger.info('Going to calculate since genesis')
-        elif not since_height_input.isdigit():
-            logger.error('Expected height as a number, aborting')
-            sys.exit(2)
-        else:
-            since_height = int(since_height_input)
-
-        period_start_height = since_height
+        period_start_height = 1
         period_start_height_input = input("Enter start period height: ")
         if len(period_start_height_input) == 0:
-            logger.info('Going to calculate payouts since {} height'.format(since_height))
+            logger.error('Expected start period height')
+            sys.exit(2)
         elif not period_start_height_input.isdigit():
             logger.error('Expected height as a number, aborting')
             sys.exit(2)
         else:
             period_start_height = int(period_start_height_input)
+
+        period_end_height = db.block_headers.find().sort([('height', DESCENDING)]).limit(1).next()['height']
 
         reward_coef_input = input("Enter reward coefficient (default is 0.9): ")
         reward_coef = 0.9
@@ -260,90 +207,62 @@ if __name__ == '__main__':
                 logger.error('Expected reward_coef as a float number')
                 sys.exit(2)
 
-        logger.debug('Launching calculation since height {}'.format(since_height))
-        known_leases = []
-        known_lease_ids = []
-        cancelled_leases = []
+        possibly_active_leases = db.leases.find(
+            {'$and': [
+                {'recipient': miner},
+                {'activation_height': {'$lt': period_end_height}},
+                {'$or': [
+                    {'cancel_height': {'$exists': False}},
+                    {'cancel_height': {'$gt': period_start_height}}
+                ]}
+            ]}
+        )
+        active_leases = filter(lambda tx: tx['activation_height'] < tx['cancel_height'], possibly_active_leases)
+
+        blocks_by_miner = db.block_headers.find(
+            {'$and': [
+                {'height': {'$gte': period_start_height}},
+                {'generator': miner}
+            ]}
+        )
+
         mined_blocks = []
-        with db_client.start_session() as db_session:
-            found_blocks_cursor = db.blocks.find(
-                {'$and': [
-                    {'height': {'$gte': since_height}},
-                    {'$or': [
-                        {'transactionCount': {'$gt': 0}},
-                        {'$and': [
-                            {'height': {'$gte': period_start_height}},
-                            {'generator': miner}
-                        ]}
-                    ]}
-                ]},
-                no_cursor_timeout=True,
-                session=db_session).sort([('height', ASCENDING)])
-            blocks_to_process = found_blocks_cursor.count()
-            logger.info('Got {} blocks to process'.format(blocks_to_process))
-            iteration_count = 1
-            for block in found_blocks_cursor:
-                txs = block['transactions']
-                block_height = block['height']
+        total_earned_fees = 0
 
-                # Update mongo session every 100th block processed
-                if iteration_count % 100 == 0:
-                    logger.debug('Iteration {}/{}, processing block at height {}'
-                          .format(iteration_count, blocks_to_process, block_height))
-                    session_update_result = db_client.admin\
-                        .command('refreshSessions', [db_session.session_id], session=db_session)
+        for block in blocks_by_miner:
+            block_fee = block['fee']
+            parent_block_id = block['reference']
+            previous_block = db.block_headers.find_one({'signature': parent_block_id})
+            if previous_block is None:
+                raise Exception("Could not find parent block '{}' for block '{}'". \
+                                format(parent_block_id, block['signature']))
 
-                leases = find_leases(txs, block_height, miner)
-                if len(leases) > 0:
-                    known_leases.extend(leases)
-                    known_lease_ids.extend(list(map(lambda l: l.lease_id, leases)))
-                    logger.debug('Found leases:', *leases, sep='\n')
+            previous_block_fee = previous_block['fee']
+            earned_fee = int(0.4 * block_fee + 0.6 * previous_block_fee)
+            total_earned_fees += earned_fee
+            mined_blocks.append(MinedBlock(earned_fee, block['height']))
 
-                cancelled = find_canceled_leases(txs, known_lease_ids, block_height)
-                if len(cancelled) > 0:
-                    cancelled_leases.extend(cancelled)
-                    logger.debug('Found cancelled leases:', *cancelled, sep='\n')
-
-                if block['generator'] == miner and block['height'] >= period_start_height:
-                    block_fee = block['fee']
-                    parent_block_id = block['reference']
-                    previous_block = db.blocks.find_one({'signature': parent_block_id})
-                    if previous_block is None:
-                        raise Exception("Could not find parent block '{}' for block '{}'".\
-                                        format(parent_block_id, block['signature']))
-
-                    previous_block_fee = previous_block['fee']
-                    earned_fee = int(0.4 * block_fee + 0.6 * previous_block_fee)
-                    if earned_fee > 0:
-                        mined_blocks.append(MinedBlock(earned_fee, block_height))
-
-                iteration_count += 1
-
-        logger.debug('Found leases:', *known_leases, sep='\n')
-        logger.debug('Cancelled leases:', *cancelled_leases, sep='\n')
-        logger.debug('Mined blocks with non-zero fees:', *mined_blocks, sep='\n')
-        logger.debug('Total earned fees: ', sum(map(lambda b: b.calculated_fees, mined_blocks)))
-
-        senders = set(map(lambda l: l.sender, known_leases))
-        logger.debug('{} unique leasers'.format(len(senders)))
+        logger.debug("Miner '{}' has mined {} blocks during the period".format(miner, len(mined_blocks)))
+        logger.debug("Total earned fees: {}".format(total_earned_fees))
 
         leaser_profiles = []
-        for sender in senders:
-            all_leases = [lease for lease in known_leases if lease.sender == sender]
-            all_leases_ids = list(map(lambda x: x.lease_id, all_leases))
-            all_canceled = [cancelled for cancelled in cancelled_leases if cancelled.lease_id in all_leases_ids]
-            profile = LeaserProfile(sender, all_leases, all_canceled)
-            leaser_profiles.append(profile)
+        for leaser_address, leaser_lease_txs in groupby(active_leases, lambda l: l['sender']):
+            leaser_leases = [
+                Lease(
+                    ltx['id'],
+                    ltx['amount'],
+                    ltx['activation_height'],
+                    ltx['cancel_height']) for ltx in leaser_lease_txs]
+            leaser_profiles.append(LeaserProfile(leaser_address, leaser_leases))
 
         logger.debug('Constructed leaser profiles:', *leaser_profiles, sep='\n')
-        max_height_in_db = db.blocks.find().sort([('height', DESCENDING)]).limit(1).next()['height']
-        stake_at_last_height = sum(map(lambda p: p.stake_for_height(max_height_in_db), leaser_profiles))
-        logger.debug('Check the stake at last crawled height {}: {}'.format(max_height_in_db, stake_at_last_height))
+        stake_at_last_height = sum(map(lambda p: p.stake_for_height(period_end_height), leaser_profiles))
+        logger.debug('Check the stake at last crawled height {}: {}'.format(period_end_height, stake_at_last_height))
 
         payouts = defaultdict(lambda: 0)
         for block in mined_blocks:
             height = block.height
-            total_stake = total_stake_at_height(leaser_profiles, height)
+            total_stake = sum(map(lambda p: p.stake_for_height(height), leaser_profiles))
             logger.debug('For block mined at height {} with total stake {}'.format(height, total_stake))
             for leaser in leaser_profiles:
                 leased_at_height = leaser.stake_for_height(height)
@@ -352,13 +271,11 @@ if __name__ == '__main__':
                     logger.debug("\tLeaser '{}' gets {} reward".format(leaser.sender, reward_for_height))
                     payouts[leaser.sender] += reward_for_height
 
-        logger.info('Here are the overall payouts for height {}'.format(max_height_in_db))
+        logger.info('Here are the overall payouts for height {}'.format(period_end_height))
         for leaser_address, payout_amount in payouts.items():
             logger.info("Leaser '{}' -> {}".format(leaser_address, payout_amount))
         logger.info('Total payouts: {}'.format(sum(payouts.values())))
 
-        left_leasers = [x.sender for x in leaser_profiles if x.stake_for_height(max_height_in_db) == 0]
-        logger.info('Left leasers: ', *left_leasers, sep='\n')
         logger.info('Calculation done')
         sys.exit()
 
