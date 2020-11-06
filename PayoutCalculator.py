@@ -162,18 +162,20 @@ if __name__ == '__main__':
             crawled_data = extract_crawled_data(blocks)
 
             db.block_headers.insert_many(crawled_data.block_headers)
-            db.leases.insert_many(crawled_data.lease_txs)
-            db.lease_cancel_txs.insert_many(crawled_data.lease_cancel_txs)
+            if len(crawled_data.lease_txs) > 0:
+                db.leases.insert_many(crawled_data.lease_txs)
 
-            # Process lease cancels one by one, updating leases with 'cancel_height' and 'lease_cancel_id'
-            for lease_cancel in crawled_data.lease_cancel_txs:
-                lease_id = lease_cancel['leaseId']
-                logger.debug("Updating cancelled lease with id '{}'".format(lease_id))
-                db.leases.update_one({"id": lease_id},
-                                     {"$set": {
-                                         "cancel_height": lease_cancel['height'],
-                                         "lease_cancel_id": lease_cancel['id']
-                                     }})
+            if len(crawled_data.lease_cancel_txs) > 0:
+                db.lease_cancel_txs.insert_many(crawled_data.lease_cancel_txs)
+                # Process lease cancels one by one, updating leases with 'cancel_height' and 'lease_cancel_id'
+                for lease_cancel in crawled_data.lease_cancel_txs:
+                    lease_id = lease_cancel['leaseId']
+                    logger.debug("Updating cancelled lease with id '{}'".format(lease_id))
+                    db.leases.update_one({"id": lease_id},
+                                         {"$set": {
+                                             "cancel_height": lease_cancel['height'],
+                                             "lease_cancel_id": lease_cancel['id']
+                                         }})
 
         logger.info('Crawling done')
         sys.exit()
