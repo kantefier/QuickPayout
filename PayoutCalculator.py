@@ -223,7 +223,14 @@ if __name__ == '__main__':
                 ]}
             ]}
         )
-        active_leases = filter(lambda tx: tx['activation_height'] < tx['cancel_height'], possibly_active_leases)
+
+        def filter_lease(lease_tx):
+            if lease_tx.get('cancel_height') is None:
+                return True
+            else:
+                return lease_tx['activation_height'] < lease_tx['cancel_height']
+
+        active_leases = filter(lambda tx: filter_lease(tx), possibly_active_leases)
 
         blocks_by_miner = db.block_headers.find(
             {'$and': [
