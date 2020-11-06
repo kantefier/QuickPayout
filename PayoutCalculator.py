@@ -118,7 +118,7 @@ if __name__ == '__main__':
     logger = logging.getLogger('PayoutCalculator')
 
     logger.info('Payout calculator launched')
-    arg_names = ['cmd', 'node_api', 'miner', 'maybe_command']
+    arg_names = ['cmd', 'node_api', 'miner', 'maybe_command', 'maybe_loglevel']
     named_args = dict(zip(arg_names, sys.argv))
     if named_args.get('node_api') is None:
         logger.error('Node api not specified')
@@ -135,6 +135,9 @@ if __name__ == '__main__':
         command = input("On your command: ")
     else:
         command = named_args.get('maybe_command')
+
+    if not named_args.get('maybe_loglevel') is None:
+        logger.setLevel(named_args.get('maybe_loglevel'))
 
     # That's insecure, should use username & password from some file or whatever
     db_client = MongoClient(port=27017)
