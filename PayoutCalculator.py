@@ -167,6 +167,7 @@ if __name__ == '__main__':
             db.block_headers.insert_many(crawled_data.block_headers)
             if len(crawled_data.lease_txs) > 0:
                 db.leases.insert_many(crawled_data.lease_txs)
+                logger.debug("Inserted leases: " + ", ".join([t['id'] for t in crawled_data.lease_txs]))
 
             if len(crawled_data.lease_cancel_txs) > 0:
                 db.lease_cancel_txs.insert_many(crawled_data.lease_cancel_txs)
