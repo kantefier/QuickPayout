@@ -265,7 +265,7 @@ if __name__ == '__main__':
                     ltx['id'],
                     ltx['amount'],
                     ltx['activation_height'],
-                    ltx['cancel_height']) for ltx in leaser_lease_txs]
+                    ltx.get('cancel_height')) for ltx in leaser_lease_txs]
             leaser_profiles.append(LeaserProfile(leaser_address, leaser_leases))
 
         logger.debug('Constructed leaser profiles:', *leaser_profiles, sep='\n')
