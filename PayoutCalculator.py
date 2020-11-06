@@ -43,7 +43,8 @@ class LeaserProfile:
         return "<LeaserProfile {}, leases:{}>".format(self.sender, len(self.leases))
 
     def __str__(self):
-        return "LeaserProfile '{}' with {} leases".format(self.sender, len(self.leases))
+        leases_str = '\n'.join(map(lambda l: l.__str__, self.leases))
+        return "LeaserProfile '{}' with leases:\n{}".format(self.sender, leases_str)
 
     def stake_for_height(self, check_height):
         active_leases_for_height = filter(lambda l: l.is_active(check_height), self.leases)
@@ -268,7 +269,7 @@ if __name__ == '__main__':
                     ltx.get('cancel_height')) for ltx in leaser_lease_txs]
             leaser_profiles.append(LeaserProfile(leaser_address, leaser_leases))
 
-        logger.debug('Constructed leaser profiles:', *leaser_profiles, sep='\n')
+        logger.debug('Constructed leaser profiles:' + '\n' + '\n'.join(map(lambda p: p.__str__, leaser_profiles)))
         stake_at_last_height = sum(map(lambda p: p.stake_for_height(period_end_height), leaser_profiles))
         logger.debug('Check the stake at last crawled height {}: {}'.format(period_end_height, stake_at_last_height))
 
