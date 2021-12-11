@@ -160,8 +160,11 @@ if __name__ == '__main__':
         logger.info("Initiating crawling process from '{}' to '{}'".format(crawl_start_height, blockchain_height))
 
         for seq_start in range(crawl_start_height, blockchain_height, step):
+            blocks_left = blockchain_height - seq_start
             seq_end = seq_start + step - 1
-            logger.debug('Crawling blocks from {} to {} ({} left)'.format(seq_start, seq_end, blockchain_height - seq_start))
+            if blocks_left < seq_end:
+                seq_end = blocks_left
+            logger.debug('Crawling blocks from {} to {} ({} left)'.format(seq_start, seq_end, blocks_left))
             blocks = get_blocks(node_api, seq_start, seq_end)
             crawled_data = extract_crawled_data(blocks)
 
